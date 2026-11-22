@@ -5,6 +5,10 @@ on:
     - cron: '17 1 * * *'   # 每天日本时间 10:17（GitHub 用 UTC 时间）
   workflow_dispatch:        # 也可以在 Actions 页面手动点 “Run workflow”
     inputs:
+      stats_only:
+        type: boolean
+        default: false
+        description: '仅用已保存的日历重新统计，不请求 SerpApi'
       calendar_only:
         type: boolean
         default: false
@@ -34,6 +38,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: 采集价格
+        if: ${{ !inputs.stats_only }}
         env:
           SERPAPI_KEY: ${{ secrets.SERPAPI_KEY || secrets.FLY }}
           PLAN: ${{ vars.PLAN }}
