@@ -219,7 +219,7 @@ def flight_numbers(leg):
     return [f.get("flight_number", "") for f in leg.get("flights", [])]
 
 
-def pair(provider, base, dest):
+def pair(provider, base, dest, booking_by_pair=None):
     if provider.remaining < 2:
         raise Pending(provider.name + " 可用额度不足两次配对")
     if provider.name == "SerpApi":
@@ -241,7 +241,24 @@ def pair(provider, base, dest):
     rows = [dict(depart=base["outbound_date"], return_date=base["return_date"], total_jpy=r["price"],
                  selected_at_utc=observed, source=provider.name + " / Google Flights", ticket_issuance="unconfirmed",
                  outbound=itinerary(selected), inbound=itinerary(r)) for r in inbound]
+    if booking_by_pair is not None:
+        for row, original in zip(rows, inbound):
+            key = pair_signature(row)
+            if all(key) and original.get("booking_token"):
+                booking_by_pair[key] = original["booking_token"]
     return rows, inbound[0].get("booking_token") if inbound else None, params
+
+
+def official_evidence(opt, source):
+    fields = ["is_official"]
+    if source == "Google Flights":
+        fields.extend(("is_airline", "airline"))
+    evidence = {k: opt[k] for k in fields if type(opt.get(k)) is bool}
+    if source == "Skyscanner" and opt.get("agent_type") in ("airline", "travel_agent"):
+        evidence["agent_type"] = opt["agent_type"] == "airline"
+    if len(set(evidence.values())) != 1:
+        return None, evidence
+    return next(iter(evidence.values())), evidence
 
 
 def seller_rows(options, out, back, departure, return_date, source):
@@ -254,12 +271,14 @@ def seller_rows(options, out, back, departure, return_date, source):
             continue
         if opt.get("flight_numbers") and normalized(opt["flight_numbers"]) != normalized(selected_numbers):
             continue
+        official, evidence = official_evidence(opt, source)
         record = dict(departure=departure, **{"return": return_date}, flight_numbers_out=flight_numbers(out),
                       flight_numbers_back=flight_numbers(back), book_with=opt["book_with"], price=opt["price"],
-                      source=source, official=opt.get("is_official") if type(opt.get("is_official")) is bool else None)
-        for field in ("baggage", "baggage_prices", "fare_type"):
-            if field in opt:
-                record[field] = opt[field]
+                      source=source, official=official, official_evidence=evidence, currency="JPY",
+                      seller_type="unknown" if official is None else ("airline" if official else "agent"),
+                      paired_signature=[signature(out), signature(back)], observed_at_jst=jst_now())
+        for field in ("baggage", "baggage_prices", "fare_type", "same_ticket", "refund_rules", "change_rules"):
+            record[field] = opt.get(field)
         rows.append(record)
     return rows
 
@@ -273,19 +292,70 @@ def signature(leg):
     return segments if segments and all(all(part) for part in segments) else None
 
 
-def sky_sellers(provider, base, dest, pairs):
+def pair_signature(pair):
+    return signature(pair["outbound"]), signature(pair["inbound"])
+
+
+def signature_text(key):
+    return json.dumps(key, ensure_ascii=True, separators=(",", ":"))
+
+
+def google_supplements(get_provider, base, dest, batch, pairs, tokens, params, checks, record_seller):
+    known_official = {signature_text(s.get("paired_signature")) for s in batch["sellers"]
+                      if s.get("official") is True and s.get("official_evidence")}
+    completed = {signature_text(c.get("paired_signature")) for c in checks
+                 if c.get("source") == "Google Flights" and c.get("status") in ("matched", "unmatched")}
+    missing = {pair_signature(p): p for p in pairs if all(pair_signature(p))
+               and signature_text(pair_signature(p)) not in known_official | completed}
+    if not missing:
+        return
+    provider = get_provider()
+    if not provider:
+        raise Pending("无可用 SearchApi")
+    if params is None:
+        if provider.remaining < 3:
+            raise Pending("重新选择同一行程和比价至少需要三次额度")
+        _, _, params = pair(provider, base, dest, tokens)
+    unselected = False
+    for key, quote in missing.items():
+        check = dict(source="Google Flights", departure=base["outbound_date"], **{"return":base["return_date"]},
+                     paired_signature=key, flight_numbers_out=flight_numbers(quote["outbound"]),
+                     flight_numbers_back=flight_numbers(quote["inbound"]), observed_at_jst=jst_now())
+        if key not in tokens:
+            checks.append(dict(check, status="not_selectable"))
+            unselected = True
+            continue
+        options = provider.search(dict(params, booking_token=tokens[key])).get("booking_options")
+        if not isinstance(options, list):
+            raise Unavailable("Google 购票渠道未返回")
+        sellers = seller_rows(options, quote["outbound"], quote["inbound"], base["outbound_date"],
+                              base["return_date"], "Google Flights")
+        checks.append(dict(check, status="matched" if sellers else "unmatched", unmatched_options=len(options)-len(sellers)))
+        record_seller(sellers, "Google Flights", key)
+    if unselected:
+        raise Unavailable("部分行程未返回同班预订标识")
+
+
+def sky_sellers(provider, base, dest, pairs, checks=None):
     query = dict(base, engine="skyscanner_flights", departure_id="TYO", arrival_id=dest)
     result = provider.search(query)
     if not isinstance(result.get("itineraries"), list):
         raise Unavailable("Skyscanner 响应缺少行程列表")
-    known = {(signature(p["outbound"]), signature(p["inbound"])) for p in pairs}
+    known = {pair_signature(p) for p in pairs}
     known = {pair_key for pair_key in known if all(pair_key)}
     rows = []
+    unmatched = 0
     for opt in result["itineraries"]:
         legs = opt.get("legs", [])
         if len(legs) == 2 and not split_booking(opt) and tuple(signature(l) for l in legs) in known:
             rows.extend(seller_rows(opt.get("booking_options", []), *legs, base["outbound_date"],
                                     base["return_date"], "Skyscanner"))
+        else:
+            unmatched += 1
+    if checks is not None:
+        checks.append(dict(source="Skyscanner", departure=base["outbound_date"], **{"return":base["return_date"]},
+                           observed_at_jst=jst_now(), unmatched_itineraries=unmatched,
+                           status="matched" if rows else "unmatched"))
     return rows
 
 
@@ -343,6 +413,18 @@ def run(args, requests, path, journal, today):
             b.setdefault("records", []).append(observation(source, jst_now(), q["route"], "round_trip",
                      kind, out, back, price, state, fp, **details))
 
+        def record_sellers(sellers, source, key=None):
+            for s in sellers:
+                add_record("seller", out, back, s["price"], "priced", "SearchApi / " + source,
+                           seller=s["book_with"], flight_numbers=s["flight_numbers_out"] + s["flight_numbers_back"],
+                           paired_signature=s["paired_signature"], official=s["official"], official_evidence=s["official_evidence"],
+                           same_ticket=s["same_ticket"], baggage=s["baggage"], baggage_prices=s["baggage_prices"],
+                           refund_rules=s["refund_rules"], change_rules=s["change_rules"])
+            if not sellers:
+                add_record("seller", out, back, None, "not_returned", "SearchApi / " + source, paired_signature=key)
+            b["sellers"].extend(sellers)
+            save(path, journal)
+
         if q["departure"] < today.isoformat():
             if "out_of_range" not in b["completed"]:
                 b["calendar_status"] = "out_of_range"
@@ -379,7 +461,8 @@ def run(args, requests, path, journal, today):
             marker = out + "/" + back
             exact = dict(base, outbound_date=out, return_date=back)
             rows = [p for p in b["paired"] if (p["depart"], p["return_date"]) == (out, back)]
-            booking = gparams = None
+            gparams = None
+            tokens = {}
             if "pair:" + marker not in b["completed"]:
                 pair_states = b.setdefault("pair_status", [])
                 state = next((r for r in pair_states if (r["depart"], r["return_date"]) == (out, back)), None)
@@ -390,7 +473,7 @@ def run(args, requests, path, journal, today):
                     source = "SearchApi / Google Flights"
                     if not get_primary():
                         raise Pending("无可用 SearchApi")
-                    rows, booking, gparams = pair(primary, exact, dest)
+                    rows, _, gparams = pair(primary, exact, dest, tokens)
                 except Unavailable as exc:
                     first_state = "pending" if isinstance(exc, Pending) else "query_failed"
                     add_record("paired", out, back, None, first_state, source)
@@ -419,51 +502,21 @@ def run(args, requests, path, journal, today):
                 b["paired"].extend(rows)
                 b["completed"].append("pair:" + marker)
                 save(path, journal)
-            if args.sellers and rows and "sky:" + marker not in b["completed"]:
+            checks = b.setdefault("seller_checks", [])
+            if (args.sellers or args.google_sellers) and rows and "sky:" + marker not in b["completed"]:
                 try:
                     if not get_primary():
                         raise Pending("无可用 SearchApi")
-                    sellers = sky_sellers(primary, exact, dest, rows)
-                    for seller in sellers:
-                        add_record("seller", out, back, seller["price"], "priced", "SearchApi / Skyscanner",
-                                   seller=seller["book_with"], flight_numbers=seller["flight_numbers_out"] + seller["flight_numbers_back"])
-                    if not sellers:
-                        add_record("seller", out, back, None, "not_returned", "SearchApi / Skyscanner")
-                    b["sellers"].extend(sellers)
+                    sellers = sky_sellers(primary, exact, dest, rows, checks)
                     b["completed"].append("sky:" + marker)
-                    save(path, journal)
+                    record_sellers(sellers, "Skyscanner")
                 except Unavailable as exc:
                     add_record("seller", out, back, None, "pending" if isinstance(exc, Pending) else "query_failed", "SearchApi / Skyscanner")
                     pending += 1
                     print("卖家报价未取得:", exc)
-            if args.google_sellers and rows and "google:" + marker not in b["completed"]:
+            if args.google_sellers and rows and "sky:" + marker in b["completed"]:
                 try:
-                    if not get_primary():
-                        raise Pending("无可用 SearchApi")
-                    quotes = rows
-                    if gparams is None:
-                        if primary.remaining < 3:
-                            raise Pending("重新选择同一行程和比价至少需要三次额度")
-                        quotes, booking, gparams = pair(primary, exact, dest)
-                    if not booking or not quotes:
-                        raise Unavailable("未返回 Google 预订标识")
-                    selected_pair = tuple(signature(quotes[0][k]) for k in ("outbound", "inbound"))
-                    if not all(selected_pair) or not any(
-                        tuple(signature(row[k]) for k in ("outbound", "inbound")) == selected_pair for row in rows
-                    ):
-                        raise Unavailable("当前可选行程和保存的去回航班未匹配")
-                    options = primary.search(dict(gparams, booking_token=booking)).get("booking_options")
-                    if not isinstance(options, list):
-                        raise Unavailable("Google 购票渠道未返回")
-                    sellers = seller_rows(options, quotes[0]["outbound"], quotes[0]["inbound"], out, back, "Google Flights")
-                    for seller in sellers:
-                        add_record("seller", out, back, seller["price"], "priced", "SearchApi / Google Flights",
-                                   seller=seller["book_with"], flight_numbers=seller["flight_numbers_out"] + seller["flight_numbers_back"])
-                    if not sellers:
-                        add_record("seller", out, back, None, "not_returned", "SearchApi / Google Flights")
-                    b["sellers"].extend(sellers)
-                    b["completed"].append("google:" + marker)
-                    save(path, journal)
+                    google_supplements(get_primary, exact, dest, b, rows, tokens, gparams, checks, record_sellers)
                 except Unavailable as exc:
                     add_record("seller", out, back, None, "pending" if isinstance(exc, Pending) else "query_failed", "SearchApi / Google Flights")
                     pending += 1

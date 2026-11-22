@@ -86,6 +86,39 @@ class RoundTripTests(unittest.TestCase):
                 provider.search({})
             self.assertEqual((provider.calls, fetch.call_count), (1, 2))
 
+    def test_official_evidence_and_observed_seller_fields(self):
+        out, back = rt.itinerary(outbound()), rt.itinerary(inbound())
+        options = [{"book_with": "Gotogate", "price": 93763}, {"book_with": "Trip.com", "price": 94240},
+                   {"book_with": "Example Airline", "price": 97140}]
+        rows = rt.seller_rows(options, out, back, OUT, BACK, "Skyscanner")
+        self.assertEqual([r["price"] - rows[0]["price"] for r in rows], [0, 477, 3377])
+        self.assertTrue(all(r["official"] is None and r["currency"] == "JPY" for r in rows))
+        self.assertTrue(all(r["observed_at_jst"].endswith("+09:00") and r["same_ticket"] is None for r in rows))
+        self.assertTrue(rt.official_evidence({"is_airline": True}, "Google Flights")[0])
+        self.assertIsNone(rt.official_evidence({"is_airline": True, "is_official": False}, "Google Flights")[0])
+        self.assertIsNone(rt.official_evidence({"book_with": "Example Airline"}, "Skyscanner")[0])
+
+    def test_supplement_only_for_pair_without_official_receipt(self):
+        out, back = rt.itinerary(outbound()), rt.itinerary(inbound())
+        later = rt.itinerary(dict(inbound(), flights=[flight("XY 16", "PEK", "NRT", BACK)]))
+        pairs = [dict(outbound=out, inbound=i) for i in (back, later)]
+        official = {"book_with": "Example Airline", "price": 62500, "is_official": True}
+        sellers = rt.seller_rows([official], out, back, OUT, BACK, "Skyscanner")
+        batch, checks = {"sellers": sellers}, []
+        params = {"engine": "google_flights", "outbound_date": OUT, "return_date": BACK}
+        token_map = {rt.pair_signature(p): label for p, label in zip(pairs, ["first", "second"])}
+        p = SimpleNamespace(search=Mock(return_value={"booking_options": [dict(official, is_airline=True,
+                      flight_numbers=["XY12","XY16"]), dict(official, flight_numbers=["XY12","XY13"])]}))
+        record = Mock()
+        rt.google_supplements(lambda: p, params, "BJS", batch, pairs, token_map, params, checks, record)
+        self.assertEqual(p.search.call_args.args[0]["booking_token"], "second")
+        self.assertEqual(p.search.call_count, 1)
+        self.assertEqual(checks[0]["unmatched_options"], 1)
+        self.assertEqual(len(record.call_args.args[0]), 1)
+        rt.google_supplements(lambda: self.fail("unexpected account check"), params, "BJS", batch, pairs,
+                              token_map, params, checks, record)
+        self.assertEqual(p.search.call_count, 1)
+
     def test_input_deduplicates_and_rejects_reverse_dates(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "queue.json"
@@ -135,7 +168,8 @@ class RoundTripTests(unittest.TestCase):
         account = {"account": {"remaining_credits": 10}, "api_usage": {"hourly_rate_limit": 10, "searches_this_hour": 0}}
         saved = {"depart": OUT, "return_date": BACK, "outbound": rt.itinerary(outbound()), "inbound": rt.itinerary(inbound())}
         batch = {"route": q["route"], "observed_date_jst": TODAY.isoformat(), "request": [q["route"], OUT, BACK, 0, 0],
-                 "paired": [saved], "calendar": [], "sellers": [], "completed": ["calendar", "pair:" + OUT + "/" + BACK]}
+                 "paired": [saved], "calendar": [], "sellers": [], "completed": ["calendar", "pair:" + OUT + "/" + BACK,
+                                                                                "sky:" + OUT + "/" + BACK]}
         journal = {"version": 1, "batches": [batch]}
         different = dict(inbound(), flights=[flight("XY 99", "PEK", "HND", BACK)])
         with tempfile.TemporaryDirectory() as folder, patch.dict(rt.os.environ, {"SEARCHAPI_KEY": "test"}):
