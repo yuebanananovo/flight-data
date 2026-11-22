@@ -5,7 +5,7 @@
 需要环境变量 SERPAPI_KEY，在 GitHub 仓库的 Settings → Secrets and variables → Actions 里设置。
 
 按 SerpApi 套餐分三个采集档位，用环境变量 PLAN 选（GitHub 仓库 Settings → Variables 里设）：
-  free     免费套餐（250 次/月）：东京与沈阳、北京、上海 6 个方向，每天查单程“提前 30 天”；每周一查单程和往返价格日历，最多 246 次/月（常规排程）
+  free     免费套餐（250 次/月）：东京与沈阳、北京、上海 6 个方向，每天查半年单程日历；每周一查提前 30 天的航班和往返日历，最多 246 次/月（常规排程）
   starter  Starter（1,000 次/月）：全部 28 个方向，每天查单程“提前 30 天”；每月 1 号和 16 号查单程和往返价格日历，约 980 次/月
   full     Developer（5,000 次/月）：全部 28 个方向，每天查单程提前 7/14/30/60 天；单数日查单程和往返价格日历、
            官网/平台比价；每周一另查一次“只看直飞”的价格日历，约 4,960 次/月
@@ -79,9 +79,11 @@ def jst_today():
 
 def calendar_query(base, route, today):
     origin, dest = route.split("-")
+    year, month = divmod(today.year * 12 + today.month - 1 + 6, 12)
+    end = today.replace(year=year, month=month + 1, day=min(today.day, calendar.monthrange(year, month + 1)[1]))
     return dict(base, engine="google_flights_calendar", departure_id=CALENDAR_LOCATIONS[origin],
-                arrival_id=CALENDAR_LOCATIONS[dest], date_range_start=(today + dt.timedelta(days=1)).isoformat(),
-                date_range_end=(today + dt.timedelta(days=180)).isoformat())
+                arrival_id=CALENDAR_LOCATIONS[dest], date_range_start=today.isoformat(),
+                date_range_end=end.isoformat())
 
 
 def round_trip_length(plan, route, today):
@@ -282,6 +284,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--no-calendar", action="store_true")
+    ap.add_argument("--calendar-only", action="store_true", help="只采集所有方向的半年单程日历")
     ap.add_argument("--fixture")
     ap.add_argument("--date", help="假装今天是这一天（测试用），格式 2026-11-23")
     ap.add_argument("--backfill", action="store_true", help="一次性回填过去约两个月的价格")
@@ -355,9 +358,12 @@ def main():
                         pass
             ok += int(got > 0)
             print(f"{route} 回填：拿到 {got} 个过去的价格点")
+    daily_leads = plan["leads"]
+    if args.calendar_only or (plan_name == "free" and today.weekday() != 0 and not args.no_calendar):
+        daily_leads = []
     for route in routes:
         a, b = route.split("-")
-        for lead in plan["leads"]:
+        for lead in daily_leads:
             dep = (today + dt.timedelta(days=lead)).isoformat()
             params = dict(base, departure_id=AIRPORTS[a], arrival_id=AIRPORTS[b], outbound_date=dep)
             res = call(params, key, args.fixture, f"{route}_{lead}")
@@ -402,7 +408,9 @@ def main():
         if not args.no_calendar:
             # 两次：含转机（stops=0，不限）和只看直飞（stops=1）
             for stops, field, tag in (("0", "routes", "*"), ("1", "routesDirect", "*D")):
-                if not plan["cal" if tag == "*" else "cal_direct"](today):
+                whole_calendar = tag == "*" and (plan_name == "free" or args.calendar_only)
+                scheduled = plan["cal" if tag == "*" else "cal_direct"](today) and not args.calendar_only
+                if not whole_calendar and not scheduled:
                     continue
                 params = dict(calendar_query(base, route, today), stops=stops)
                 res = call(params, key, args.fixture, f"{route}_calendar{tag}")
@@ -411,6 +419,7 @@ def main():
                     continue
                 lst = calendar_prices(res)
                 if lst:
+                    ok += 1
                     cal[field][route] = lst
                     want = {(today + dt.timedelta(days=L)).isoformat() for L in CAL_LEADS}
                     for d, p in lst:
@@ -418,7 +427,7 @@ def main():
                             rows[(today.isoformat(), route, d, tag)] = p
                 print(f"{route} 价格日历（{'直飞' if tag == '*D' else '含转机'}）: {len(lst)} 天")
             # 往返票价格日历：这次查哪种“去几天回”，按日期和航线轮换
-            if plan["cal"](today):
+            if plan["cal"](today) and not args.calendar_only:
                 trip = round_trip_length(plan_name, route, today)
                 params = dict(calendar_query(base, route, today), type="1", round_trip_days=trip)
                 res = call(params, key, args.fixture, f"{route}_calendarRT")
@@ -434,6 +443,22 @@ def main():
 
     cutoff = (today - dt.timedelta(days=KEEP_DAYS)).isoformat()
     out_rows = sorted([k[0], k[1], k[2], k[3], v] for k, v in rows.items() if k[0] >= cutoff)
+    # 按出发月份保存每次实际取得的日历。更新页面只需取所选月份的记录。
+    monthly = {}
+    for route, days in cal["routes"].items():
+        for departure, price in days:
+            monthly.setdefault(departure[:7], {}).setdefault(route, {})[departure] = price
+    for month, routes_seen in monthly.items():
+        folder = os.path.join(os.path.dirname(OUT), "calendars")
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, month + ".json")
+        observations = {}
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                observations = json.load(f)
+        observations.setdefault(today.isoformat(), {}).update(routes_seen)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(observations, f, ensure_ascii=False, separators=(",", ":"))
     old_cal = data.get("calendar") or {}
     # 今天没查价格日历（或没查到）的部分，保留上一次的
     for field in ("routes", "routesDirect"):
