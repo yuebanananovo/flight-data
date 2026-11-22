@@ -27,7 +27,7 @@ jobs:
           python-version: '3.12'
       - name: 采集价格
         env:
-          SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
+          SERPAPI_KEY: ${{ secrets.SERPAPI_KEY || secrets.FLY }}
           PLAN: ${{ vars.PLAN }}
         run: python scripts/collect.py ${{ inputs.backfill && '--backfill' || '' }}
       - name: 保存数据

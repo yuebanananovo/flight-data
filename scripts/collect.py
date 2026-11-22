@@ -5,7 +5,7 @@
 需要环境变量 SERPAPI_KEY，在 GitHub 仓库的 Settings → Secrets and variables → Actions 里设置。
 
 按 SerpApi 套餐分三个采集档位，用环境变量 PLAN 选（GitHub 仓库 Settings → Variables 里设）：
-  free     免费套餐（250 次/月）：4 个航线方向，每天查单程“提前 30 天”；每周一查单程和往返价格日历，约 165 次/月
+  free     免费套餐（250 次/月）：东京与沈阳、北京、上海 6 个方向，每天查单程“提前 30 天”；每周一查单程和往返价格日历，最多 246 次/月（常规排程）
   starter  Starter（1,000 次/月）：全部 28 个方向，每天查单程“提前 30 天”；每月 1 号和 16 号查单程和往返价格日历，约 980 次/月
   full     Developer（5,000 次/月）：全部 28 个方向，每天查单程提前 7/14/30/60 天；单数日查单程和往返价格日历、
            官网/平台比价；每周一另查一次“只看直飞”的价格日历，约 4,960 次/月
@@ -23,7 +23,7 @@
   python scripts/collect.py --backfill      一次性回填过去约两个月的价格（只需要跑一次）：
                                             每个航线方向查未来 2 个月里每隔 3 天的出发日期，
                                             用 Google 返回的历史价格拼出过去的走势。
-                                            free 档约 80 次，starter / full 档约 560 次
+                                            free 档最多 120 次，starter / full 档约 560 次
 """
 import argparse
 import calendar
@@ -62,7 +62,7 @@ HUBS = {"ICN": "首尔", "GMP": "首尔", "PUS": "釜山", "CJU": "济州", "PVG
 RT_LENS = [1, 3, 7, 14, 30, 60, 120]  # 往返票轮流查的“去几天回”
 ROUTES = [r for j in JP for c in CN for r in (f"{j}-{c}", f"{c}-{j}")]
 PLANS = {
-    "free": {"routes": ["TYO-SHA", "SHA-TYO", "TYO-BJS", "BJS-TYO"], "leads": [30],
+    "free": {"routes": ["TYO-SHE", "SHE-TYO", "TYO-BJS", "BJS-TYO", "TYO-SHA", "SHA-TYO"], "leads": [30],
              "cal": lambda d: d.weekday() == 0, "cal_direct": lambda d: False, "booking": lambda d: False},
     "starter": {"routes": ROUTES, "leads": [30],
                 "cal": lambda d: d.day in (1, 16), "cal_direct": lambda d: False, "booking": lambda d: False},
@@ -148,6 +148,33 @@ def call(params, key, fixture=None, name=""):
     return None
 
 
+def stop_label(legs, layovers):
+    """保留整程报价，用航段和机场区分经停、转乘与未确认的中途停站。"""
+    if len(legs) == 1 and not layovers:
+        return ""
+    via = []
+    for airport in layovers or [leg.get("arrival_airport") or {} for leg in legs[:-1]]:
+        code = airport.get("id")
+        city = HUBS.get(code) or airport.get("name") or code
+        if city and city not in via:
+            via.append(city)
+    place = "、".join(via) or "中途站"
+    numbers = ["".join((leg.get("flight_number") or "").upper().split()) for leg in legs]
+    airlines = [leg.get("airline") for leg in legs]
+    arrivals = [(leg.get("arrival_airport") or {}).get("id") for leg in legs[:-1]]
+    departures = [(leg.get("departure_airport") or {}).get("id") for leg in legs[1:]]
+    kind = "中转方式待确认"
+    if arrivals and all(arrivals) and all(departures):
+        if arrivals != departures:
+            kind = "换机场转机"
+        elif all(numbers) and all(airlines):
+            if len(set(numbers)) == 1 and len(set(airlines)) == 1:
+                kind = "同航班号经停"
+            elif len(set(numbers)) > 1:
+                kind = "转乘不同航班"
+    return f"（经{place}·{kind}）"
+
+
 def airline_prices(res):
     """从一次搜索结果里取出每家航司的最低价。
     直飞记作航司名，比如“全日空”；转机记作“大韩航空（经首尔）”；两家航司拼的记作“甲+乙（经某地）”。"""
@@ -164,14 +191,7 @@ def airline_prices(res):
                 if a and a not in names:
                     names.append(a)
             name = "+".join(names) or "其他"
-            stops = opt.get("layovers") or []
-            if len(legs) > 1 or stops:
-                via = []
-                for lay in stops or [{"id": leg.get("arrival_airport", {}).get("id")} for leg in legs[:-1]]:
-                    city = HUBS.get(lay.get("id") or "", lay.get("name") or lay.get("id"))
-                    if city and city not in via:
-                        via.append(city)
-                name += "（经" + "、".join(via) + "）" if via else "（转机）"
+            name += stop_label(legs, opt.get("layovers") or [])
             if name not in best or price < best[name]:
                 best[name] = int(price)
     return best
