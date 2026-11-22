@@ -1,0 +1,34 @@
+name: 私有付费机票日程
+on:
+  schedule:
+    - cron: '37 1 * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: paid-flight-schedule
+  cancel-in-progress: false
+jobs:
+  collect:
+    if: ${{ github.event.repository.private && vars.ENABLE_PAID_FLIGHTS == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 执行已授权日程
+        env:
+          ENABLE_PAID_FLIGHTS: ${{ vars.ENABLE_PAID_FLIGHTS }}
+          PRIVATE_FLIGHT_PLAN: ${{ vars.PRIVATE_FLIGHT_PLAN || secrets.PRIVATE_FLIGHT_PLAN }}
+          SEARCHAPI_KEY: ${{ secrets.SEARCHAPI_KEY }}
+        run: python scripts/paid_collect.py
+      - name: 私库存档
+        if: ${{ !cancelled() && github.event.repository.private }}
+        run: |
+          if [ ! -d private-flight-data ]; then exit 0; fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- private-flight-data
+          git diff --cached --quiet || git commit --quiet -m 'Update private flight observations'
+          git push --quiet

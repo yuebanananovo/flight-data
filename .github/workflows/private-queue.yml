@@ -1,0 +1,25 @@
+name: 回执私有机票请求
+on:
+  schedule:
+    - cron: '47 1 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: private-flight-queue
+  cancel-in-progress: false
+jobs:
+  work:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 领取一项并回执
+        env:
+          HELPER_FLIGHT_QUEUE_URL: ${{ vars.HELPER_FLIGHT_QUEUE_URL }}
+          HELPER_FLIGHT_QUEUE_KEY: ${{ secrets.HELPER_FLIGHT_QUEUE_KEY }}
+          SERPAPI_KEY: ${{ secrets.SERPAPI_KEY || secrets.FLY }}
+          QUEUE_SERP_RESERVE: ${{ vars.QUEUE_SERP_RESERVE }}
+        run: python scripts/queue_worker.py

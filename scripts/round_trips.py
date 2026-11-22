@@ -149,7 +149,7 @@ def airport_time(airport):
 
 
 def itinerary(offer):
-    result = {k: offer[k] for k in ("type", "total_duration", "layovers", "baggage", "separate_tickets") if k in offer}
+    result = {k: offer[k] for k in ("type", "total_duration", "layovers", "stopovers", "technical_stops", "baggage", "separate_tickets") if k in offer}
     result["flights"] = []
     result["segments"] = []
     for flight in offer["flights"]:
@@ -164,6 +164,8 @@ def itinerary(offer):
         result["segments"].append(dict(marketing_airline=leg.get("marketing_airline") or
                 (airline_code.group(1) if airline_code else None), flight_number=number,
                 reported_airline=leg.get("airline"), operating_airline=leg.get("operating_airline"),
+                operating_airline_status="known" if leg.get("operating_airline") else "unknown",
+                intermediate_stops=leg.get("stopovers") or leg.get("technical_stops") or leg.get("stops") or [],
                 departure_airport=leg["departure_airport"], arrival_airport=leg["arrival_airport"],
                 duration_minutes=leg.get("duration")))
     segments = result["segments"]
@@ -183,8 +185,8 @@ def itinerary(offer):
     result["connections"] = connections
     types = {c["kind"] for c in connections}
     if not connections:
-        routing = "nonstop" if not offer.get("layovers") and not any(
-            f.get("stops") or f.get("technical_stops") for f in offer["flights"]) else "unconfirmed"
+        documented = any(s["intermediate_stops"] for s in segments) or offer.get("stopovers") or offer.get("technical_stops")
+        routing = "unconfirmed" if offer.get("layovers") or documented else "nonstop"
     else:
         routing = "transfer" if "transfer" in types else "same_number_stop" if types == {"same_number_stop"} else "unconfirmed"
     result.update(routing=routing, baggage=offer.get("baggage"), same_ticket=offer.get("same_ticket"),
@@ -219,7 +221,7 @@ def flight_numbers(leg):
     return [f.get("flight_number", "") for f in leg.get("flights", [])]
 
 
-def pair(provider, base, dest, booking_by_pair=None):
+def pair(provider, base, dest, booking_by_pair=None, accept_offer=None):
     if provider.remaining < 2:
         raise Pending(provider.name + " 可用额度不足两次配对")
     if provider.name == "SerpApi":
@@ -229,6 +231,8 @@ def pair(provider, base, dest, booking_by_pair=None):
         params = dict(base)
     params["engine"] = "google_flights"
     candidates = list(eligible(provider.search(params), "TYO", dest, base["outbound_date"]))
+    if accept_offer:
+        candidates = [r for r in candidates if accept_offer(r)]
     if not candidates:
         return [], None, None
     outbound = [r for r in candidates if r.get("departure_token")]
@@ -237,6 +241,8 @@ def pair(provider, base, dest, booking_by_pair=None):
     selected = min(outbound, key=lambda r:r["price"])
     result = provider.search(dict(params, departure_token=selected["departure_token"]))
     inbound = sorted(eligible(result, dest, "TYO", base["return_date"]), key=lambda r:r["price"])
+    if accept_offer:
+        inbound = [r for r in inbound if accept_offer(r)]
     observed = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     rows = [dict(depart=base["outbound_date"], return_date=base["return_date"], total_jpy=r["price"],
                  selected_at_utc=observed, source=provider.name + " / Google Flights", ticket_issuance="unconfirmed",

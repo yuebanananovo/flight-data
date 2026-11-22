@@ -19,7 +19,9 @@ def fingerprint(params, private_key=None):
     # Only normalized, non-secret search criteria enter either fingerprint.
     allowed = ("route", "departure", "return_date", "outbound_date", "date_range_start", "date_range_end",
                "flexOut", "flexBack", "scope", "trip_days", "stops", "engine", "type", "travel_class",
-               "currency", "gl", "hl", "adults", "airline", "flight_type", "flight_numbers")
+               "currency", "gl", "hl", "adults", "airline", "flight_type", "flight_numbers",
+               "included_airlines","include_airlines","excluded_airlines","departure_id","arrival_id",
+               "outbound_date_start","outbound_date_end","return_date_start","return_date_end","round_trip_days")
     stable = json.dumps({k: params[k] for k in allowed if k in params}, sort_keys=True,
                         separators=(",", ":")).encode()
     return (hmac.new(private_key, stable, hashlib.sha256).hexdigest() if private_key is not None
@@ -32,6 +34,9 @@ def observation(source, when, route, scope, kind, depart, back, price, status, f
     if status == "priced" and (type(price) not in (int, float) or not 0 < price < 1000000000):
         raise ValueError("invalid price")
     stay = (dt.date.fromisoformat(back) - dt.date.fromisoformat(depart)).days if back and depart else None
+    for k in ("baggage","same_ticket","refund_rules","change_rules","operating_airline","official"):
+        if evidence.get(k) is None:
+            evidence[k] = "unknown"
     return dict(version=1, source=source, observed_at_jst=when, observed_date_jst=when[:10],
                 route=route, scope=scope, price_type=kind, departure=depart, return_date=back,
                 stay_days=stay, price=price if status == "priced" else None, currency="JPY",

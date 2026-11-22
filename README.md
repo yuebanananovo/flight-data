@@ -42,3 +42,15 @@ python3 scripts/round_trips.py ~/Downloads/queue.json \
 - SerpApi 备用配对默认关闭。只有显式指定 `--serp-fallback N` 且设置了环境变量 `SERPAPI_KEY` 才使用它。N 是上述 SearchApi 上限之外的额外搜索上限，默认还给 SerpApi 保留 246 次，可用 `--serp-reserve` 调整。
 - 私人日期在本机处理。每个本机结果文件有独立的 `.hmac-key` 文件，供本机计算参数指纹。公开工作流只接受公共日程或已固定的公共样本。去回配对各自保留营销航班号、接口给出的实际承运信息、各段当地起降日时、时长及转机证据；未确认的行李、同票、退改条件存为 `null`。
 - 部分步骤未完成时，程序保留已取得的报价并以状态码 2 退出。当天使用同一个输出文件再次运行，会跳过已完成步骤；之后重新运行会另存当天的观察。成功执行但供应商没有返回的组合单独标记。双向城市机场匹配、日期窗口、预算与重试可用 `python3 -m unittest discover -s tests` 离线验证。
+
+## 私有队列与付费日程
+
+网站的「查这一天」队列通过 `private-queue.yml` 每日最多领取一项单程参考查询。设置 Actions Variable `HELPER_FLIGHT_QUEUE_URL` 为 HTTPS 的 `/api/flights/queue/worker`，Secret `HELPER_FLIGHT_QUEUE_KEY` 为服务端同一凭据，另需原有 SerpApi 密钥。可用 `QUEUE_SERP_RESERVE` 保留查询次数。队列日期和回执保存在受限端点；客户端网络重试使用当前 runner 临时目录内的回执。
+
+付费代码供独立私有仓库使用。私库工作流可检出公共代码的固定提交，获得 `scripts/` 和公共 `data/history/` 基线。先用 `python3 scripts/paid_collect.py --estimate` 核算当月需求。私有计划由私库 Variable `PRIVATE_FLIGHT_PLAN` 提供，也兼容同名 Secret，JSON 支持以下字段：
+
+- `holidays` 是假期数组，每项包含 `departure` 和 `returnDate`；`requests` 是要精确配对的私人原日期数组，还需要 `route`。
+- `stays` 默认 `[7,14,21,30]`，`lowest_pairs` 默认 2 组。若整月全覆盖超过预算，普通窗口按日轮转。
+- `monthly_limit` 默认 1000，`reserve` 默认 100，`daily_limit` 默认 40。每次查询还受实际账户月余量、小时余量及按剩余日数分配的预算限制。
+
+需在私有仓库手动设置 Variable `ENABLE_PAID_FLIGHTS=true` 和对应 Secret `SEARCHAPI_KEY`，工作流会再次核对付费月度额度。结果只写入该私库的 `private-flight-data/`。按日期命名的 JSON 可导入网站；`one_way_calendar` 与 `filtered_calendar` 各自保留筛选口径，完整观察另按日压缩存档。网页当前支持的完整往返日历与配对沿用 `calendar`、`paired`。
