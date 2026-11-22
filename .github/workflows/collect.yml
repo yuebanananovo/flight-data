@@ -5,6 +5,10 @@ on:
     - cron: '17 1 * * *'   # 每天日本时间 10:17（GitHub 用 UTC 时间）
   workflow_dispatch:        # 也可以在 Actions 页面手动点 “Run workflow”
     inputs:
+      holiday_history:
+        type: boolean
+        default: false
+        description: '恢复完整价格历史并用免费余量补圣诞至年初的四个方向'
       stats_only:
         type: boolean
         default: false
@@ -44,9 +48,12 @@ jobs:
           PLAN: ${{ vars.PLAN }}
           DEPARTURE: ${{ inputs.departure }}
           CALENDAR_ONLY: ${{ inputs.calendar_only }}
+          HOLIDAY_HISTORY: ${{ inputs.holiday_history }}
           BACKFILL: ${{ inputs.backfill }}
         run: |
-          if [ -n "$DEPARTURE" ]; then
+          if [ "$HOLIDAY_HISTORY" = true ]; then
+            python scripts/holiday_history.py
+          elif [ -n "$DEPARTURE" ]; then
             python scripts/trip.py "$DEPARTURE"
           elif [ "$CALENDAR_ONLY" = true ]; then
             python scripts/collect.py --calendar-only

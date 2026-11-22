@@ -25,6 +25,8 @@
                                             用 Google 返回的历史价格拼出过去的走势。
                                             free 档最多 120 次，starter / full 档约 560 次
 """
+from fare_history import record
+
 import argparse
 import calendar
 import datetime as dt
@@ -349,6 +351,8 @@ def main():
                 calls += 1
                 if not res:
                     continue
+                record(route, dep, (res.get("price_insights") or {}).get("price_history"),
+                       airlines=airline_prices(res), observed=today.isoformat())
                 if k in LEADS:  # 今天的价格也顺便存下
                     for airline, p in airline_prices(res).items():
                         rows[(today.isoformat(), route, dep, airline)] = p
@@ -379,6 +383,7 @@ def main():
                 rows[(today.isoformat(), route, dep, airline)] = p
             pi = res.get("price_insights")
             main = lead == (30 if 30 in plan["leads"] else plan["leads"][-1])
+            record(route, dep, (pi or {}).get("price_history"), airlines=prices, observed=today.isoformat())
             if pi and main:
                 insights[route] = {
                     "date": today.isoformat(), "dep": dep,

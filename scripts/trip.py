@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 
+from fare_history import record
 from collect import AIRPORTS, ROOT, account_capacity, calendar_prices, calendar_query, call, jst_today, stop_label
 
 
@@ -64,6 +65,7 @@ def main():
             hist = (response.get('price_insights') or {}).get('price_history') or []
             history = sorted({dt.datetime.fromtimestamp(ts, dt.timezone(dt.timedelta(hours=9))).date().isoformat(): int(p)
                               for ts, p in hist if isinstance(ts, (int, float)) and isinstance(p, (int, float)) and p > 0}.items())
+            record(route, date_key, history, dated=True)
             data['dates'].setdefault(date_key, {})[route] = {'observed': today.isoformat(), 'options': options, 'history': history}
             count += bool(options)
             print(route, date_key, len(options), '条全程报价；历史', len(history), '天', flush=True)
