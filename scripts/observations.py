@@ -3,7 +3,8 @@ from collections import defaultdict
 from datetime import date, timedelta
 from statistics import median
 
-from collect import jst_today
+from collect import CAL_LEADS, jst_today
+from market_history import write_market
 from fare_history import DATA, read, save
 
 
@@ -21,6 +22,9 @@ def main():
         for route, deps in read(f).items():
             for dep, fields in deps.items():
                 days[route, dep]["google"].update(fields.get("google", {}))
+    data = read(DATA / "prices.json")
+    as_of = max((row[0] for row in data.get("rows", [])), default=today.isoformat())
+    write_market(days, CAL_LEADS, as_of)
     buckets = defaultdict(list)
     for (route, dep), sources in days.items():
         depart = date.fromisoformat(dep)
