@@ -39,14 +39,16 @@ def run():
         return int(data["account"]["remaining_credits"])
 
     first, second = balance(), balance()
-    if first != config["expected_credits"] or first < 15 or second != first:
+    focused = os.getenv("PROBE_MODE") == "JL"
+    limit = 3 if focused else 15
+    if first != config["expected_credits"] or first < limit or second != first:
         raise RuntimeError("赠送次数或余额自检未通过，未开始搜索。")
     used = 0
     findings = {"balance_before": first, "balance_after_account_check": second}
 
     def search(params):
         nonlocal used
-        if used >= 15:
+        if used >= limit:
             return {}
         used += 1
         try:
@@ -58,6 +60,20 @@ def run():
                 flight_type="round_trip", travel_class="economy", currency="JPY", hl="en", gl="jp",
                 adults=1, outbound_date=config["out"], return_date=config["back"])
     beijing = dict(base, arrival_id=CALENDAR_LOCATIONS["BJS"], included_airlines="NH,JL,CA")
+    if focused:
+        # Use airports with scheduled JL service and request both directions explicitly.
+        params = dict(base, departure_id="HND", arrival_id="PEK", included_airlines="JL", stops="nonstop")
+        outbound = next((r for r in options(search(params)) if same_airline(r,"JL") and r.get("departure_token")),None)
+        inbound = None
+        if outbound:
+            inbound = next((r for r in options(search(dict(params,departure_token=outbound["departure_token"]))) if same_airline(r,"JL") and r.get("booking_token")),None)
+        response = search(dict(params,booking_token=inbound["booking_token"])) if inbound else {}
+        rows = response.get("booking_options")
+        findings["JL_direct"] = {"outbound":bool(outbound),"inbound":bool(inbound),"booking_returned":isinstance(rows,list),
+                                 "seller_flags":seller_summary(rows or [],"Google Flights")}
+        findings.update(calls_attempted=used,balance_after=balance())
+        print("PROBE_RESULT "+json.dumps(findings,sort_keys=True))
+        return
     beijing_options = options(search(beijing))
     google = {}
     for code in AIRLINES:
