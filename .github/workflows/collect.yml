@@ -17,10 +17,6 @@ on:
         type: boolean
         default: false
         description: '只刷新半年单程日历'
-      departure:
-        description: '可选：指定从东京出发的单程日期（YYYY-MM-DD），同时取同月日历'
-        type: string
-        required: false
       backfill:
         description: '回填过去约两个月的价格（只需要跑一次）'
         type: boolean
@@ -45,16 +41,16 @@ jobs:
         if: ${{ !inputs.stats_only }}
         env:
           SERPAPI_KEY: ${{ secrets.SERPAPI_KEY || secrets.FLY }}
+          SEARCHAPI_KEY: ${{ secrets.SEARCHAPI_KEY }}
+          DAILY_SEARCHAPI_LIMIT: ${{ vars.DAILY_SEARCHAPI_LIMIT }}
+          SEARCHAPI_RESERVE: ${{ vars.SEARCHAPI_RESERVE }}
           PLAN: ${{ vars.PLAN }}
-          DEPARTURE: ${{ inputs.departure }}
           CALENDAR_ONLY: ${{ inputs.calendar_only }}
           HOLIDAY_HISTORY: ${{ inputs.holiday_history }}
           BACKFILL: ${{ inputs.backfill }}
         run: |
           if [ "$HOLIDAY_HISTORY" = true ]; then
             python scripts/holiday_history.py
-          elif [ -n "$DEPARTURE" ]; then
-            python scripts/trip.py "$DEPARTURE"
           elif [ "$CALENDAR_ONLY" = true ]; then
             python scripts/collect.py --calendar-only
           elif [ "$BACKFILL" = true ]; then
@@ -67,9 +63,17 @@ jobs:
           python scripts/monthly_lows.py
           python scripts/observations.py
       - name: 保存数据
+        if: ${{ !cancelled() }}
+        env:
+          PRIOR_STATUS: ${{ job.status }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data
+          if [ "$PRIOR_STATUS" = success ]; then
+            git add data
+          else
+            git add data/collector-status.json
+            if [ -d data/quote-observations ]; then git add data/quote-observations; fi
+          fi
           git diff --cached --quiet || git commit -m "数据更新 $(date -u +%F)"
           git push

@@ -265,7 +265,8 @@ def calendar_rt_prices(res, trip):
     """往返价格日历：只留“回程日 - 出发日 = trip”的。"""
     out = []
     for item in res.get("prices") or res.get("calendar") or []:
-        d, back, p = item.get("outbound_date") or item.get("date"), item.get("return_date"), item.get("price")
+        d = item.get("outbound_date") or item.get("date") or item.get("departure")
+        back, p = item.get("return_date") or item.get("return"), item.get("price")
         if not d or not isinstance(p, (int, float)) or p <= 0:
             continue
         try:
@@ -280,7 +281,7 @@ def calendar_rt_prices(res, trip):
 def calendar_prices(res):
     out = []
     for item in res.get("prices") or res.get("calendar") or []:
-        d, p = item.get("outbound_date") or item.get("date"), item.get("price")
+        d, p = item.get("outbound_date") or item.get("date") or item.get("departure"), item.get("price")
         if d and isinstance(p, (int, float)) and p > 0:
             out.append([d, int(p)])
     return sorted(out)
@@ -297,8 +298,8 @@ def main():
     args = ap.parse_args()
 
     key = os.environ.get("SERPAPI_KEY", "").strip()
-    if not key and not args.fixture:
-        print("没有设置 SERPAPI_KEY，这次跳过采集（网站会继续显示模拟数据）。")
+    if args.backfill and not key and not args.fixture:
+        print("没有设置 SERPAPI_KEY，跳过回填。")
         return 1
 
     today = dt.date.fromisoformat(args.date) if args.date else jst_today()
@@ -370,12 +371,27 @@ def main():
     daily_leads = plan["leads"]
     if args.calendar_only or (plan_name == "free" and today.weekday() != 0 and not args.no_calendar):
         daily_leads = []
+    scheduled = None
+    if routes and not args.fixture:
+        from daily_sources import DailySources
+        calendars = int(plan_name == "free" or args.calendar_only or plan["cal"](today))
+        if not args.calendar_only:
+            calendars += int(plan["cal_direct"](today)) + int(plan["cal"](today))
+        count = len(daily_leads) + (0 if args.no_calendar else calendars)
+        count += int(bool(daily_leads) and plan["booking"](today))
+        scheduled = DailySources(key, len(routes) * count)
+
+    def query(params, route, label):
+        if scheduled:
+            return scheduled.call(params, route)
+        return call(params, key, args.fixture, label)
+
     for route in routes:
         a, b = route.split("-")
         for lead in daily_leads:
             dep = (today + dt.timedelta(days=lead)).isoformat()
             params = dict(base, departure_id=AIRPORTS[a], arrival_id=AIRPORTS[b], outbound_date=dep)
-            res = call(params, key, args.fixture, f"{route}_{lead}")
+            res = query(params, route, f"{route}_{lead}")
             calls += 1
             if not res:
                 continue
@@ -405,7 +421,7 @@ def main():
                 opt = cheapest_option(res)
                 if opt:
                     names = [leg.get("airline") for leg in opt.get("flights") or []]
-                    bres = call(dict(params, booking_token=opt["booking_token"]), key, args.fixture, f"{route}_booking")
+                    bres = query(dict(params, booking_token=opt["booking_token"]), route, f"{route}_booking")
                     calls += 1
                     sellers = booking_sellers(bres or {}, names)
                     if sellers:
@@ -419,11 +435,11 @@ def main():
             # 两次：含转机（stops=0，不限）和只看直飞（stops=1）
             for stops, field, tag in (("0", "routes", "*"), ("1", "routesDirect", "*D")):
                 whole_calendar = tag == "*" and (plan_name == "free" or args.calendar_only)
-                scheduled = plan["cal" if tag == "*" else "cal_direct"](today) and not args.calendar_only
-                if not whole_calendar and not scheduled:
+                calendar_due = plan["cal" if tag == "*" else "cal_direct"](today) and not args.calendar_only
+                if not whole_calendar and not calendar_due:
                     continue
                 params = dict(calendar_query(base, route, today), stops=stops)
-                res = call(params, key, args.fixture, f"{route}_calendar{tag}")
+                res = query(params, route, f"{route}_calendar{tag}")
                 calls += 1
                 checks.setdefault(route, {})[tag] = "ok" if res is not None else "failed"
                 if not res:
@@ -446,7 +462,7 @@ def main():
             if plan["cal"](today) and not args.calendar_only:
                 trip = round_trip_length(plan_name, route, today)
                 params = dict(calendar_query(base, route, today), type="1", round_trip_days=trip)
-                res = call(params, key, args.fixture, f"{route}_calendarRT")
+                res = query(params, route, f"{route}_calendarRT")
                 calls += 1
                 checks.setdefault(route, {})["rt-" + str(trip)] = "ok" if res is not None else "failed"
                 lst = calendar_rt_prices(res or {}, trip)
@@ -459,6 +475,8 @@ def main():
                     cal.setdefault("rtObserved", {}).setdefault(route, {})[str(trip)] = today.isoformat()
                 print(f"{route} 往返价格日历（去 {trip} 天回）: {len(lst)} 天")
 
+    if scheduled:
+        scheduled.finish()
     if checks:
         path = DATA / "calendar-status" / (today.isoformat()[:7] + ".json")
         runs = read(path)
@@ -485,7 +503,9 @@ def main():
         if os.path.exists(path):
             with open(path, encoding="utf-8") as f:
                 observations = json.load(f)
-        observations.setdefault(today.isoformat(), {}).update(routes_seen)
+        by_route = observations.setdefault(today.isoformat(), {})
+        for route, dates in routes_seen.items():
+            by_route.setdefault(route, {}).update(dates)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(observations, f, ensure_ascii=False, separators=(",", ":"))
     old_cal = data.get("calendar") or {}

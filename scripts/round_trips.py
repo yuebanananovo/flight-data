@@ -6,6 +6,7 @@ import getpass
 import json
 import math
 import os
+import re
 import sys
 import tempfile
 import urllib.error
@@ -14,6 +15,7 @@ import urllib.request
 from pathlib import Path
 
 from collect import AIRPORTS, CALENDAR_LOCATIONS, jst_today
+from quote_records import fingerprint, jst_now, observation, private_key_for
 
 
 CITIES = {"SHE", "BJS", "SHA", "DLC"}
@@ -49,6 +51,8 @@ def fetch(url, params, headers):
         raise Unavailable(f"HTTP {exc.code}") from None
     except (OSError, ValueError):
         raise Unavailable("服务连接或响应异常") from None
+    if isinstance(result, dict) and "hasn't returned any results" in str(result.get("error", "")):
+        return {"best_flights": [], "other_flights": [], "calendar": [], "booking_options": []}
     if not isinstance(result, dict) or result.get("error"):
         raise Unavailable("服务未返回有效结果")
     return result
@@ -74,6 +78,7 @@ class Provider:
             used = account.get("this_hour_searches")
         if not all(type(n) is int and n >= 0 for n in (credits, hourly, used)):
             raise Unavailable(name + " 余额或小时用量无法确认")
+        self.credits = credits
         self.remaining = max(0, min(limit, credits - reserve, hourly - used))
         print(f"{name} 剩余 {credits} 次，本次最多可发 {self.remaining} 次搜索。")
 
@@ -105,8 +110,8 @@ def validated_queue(path, today):
         if route not in {"TYO-" + city for city in CITIES}:
             raise ValueError("只支持从东京往返沈阳、北京、上海或大连")
         depart, back = (dt.date.fromisoformat(r[key]) for key in ("departure", "returnDate"))
-        if depart < today or back < depart:
-            raise ValueError("请检查过期日期及去回程顺序")
+        if back < depart:
+            raise ValueError("请检查去回程顺序")
         flex = [r.get(key, 0) for key in ("flexOut", "flexBack")]
         if any(type(n) is not int or not 0 <= n <= 2 for n in flex):
             raise ValueError("日期可调整范围为 0–2 天")
@@ -146,6 +151,7 @@ def airport_time(airport):
 def itinerary(offer):
     result = {k: offer[k] for k in ("type", "total_duration", "layovers", "baggage", "separate_tickets") if k in offer}
     result["flights"] = []
+    result["segments"] = []
     for flight in offer["flights"]:
         leg = dict(flight)
         for k in ("departure_airport", "arrival_airport"):
@@ -153,6 +159,36 @@ def itinerary(offer):
             day, time = airport_time(place)
             leg[k] = dict(place, date=day, time=time)
         result["flights"].append(leg)
+        number = leg.get("flight_number")
+        airline_code = re.match(r"^([A-Z0-9]{2})\s*\d", number or "")
+        result["segments"].append(dict(marketing_airline=leg.get("marketing_airline") or
+                (airline_code.group(1) if airline_code else None), flight_number=number,
+                reported_airline=leg.get("airline"), operating_airline=leg.get("operating_airline"),
+                departure_airport=leg["departure_airport"], arrival_airport=leg["arrival_airport"],
+                duration_minutes=leg.get("duration")))
+    segments = result["segments"]
+    connections = []
+    for i, (arriving, onward) in enumerate(zip(segments, segments[1:])):
+        a, b = arriving["arrival_airport"].get("id"), onward["departure_airport"].get("id")
+        numbers = [str(s["flight_number"] or "").replace(" ", "").upper() for s in (arriving, onward)]
+        kind = "unconfirmed"
+        if a and b and (a != b or (all(numbers) and numbers[0] != numbers[1])):
+            kind = "transfer"
+        elif a and a == b and numbers[0] and numbers[0] == numbers[1]:
+            kind = "same_number_stop"
+        layovers = offer.get("layovers") or []
+        layover = layovers[i] if i < len(layovers) else {}
+        connections.append(dict(arrival_airport=a, next_departure_airport=b, kind=kind,
+                                duration_minutes=layover.get("duration") if layover.get("id") == a else None))
+    result["connections"] = connections
+    types = {c["kind"] for c in connections}
+    if not connections:
+        routing = "nonstop" if not offer.get("layovers") and not any(
+            f.get("stops") or f.get("technical_stops") for f in offer["flights"]) else "unconfirmed"
+    else:
+        routing = "transfer" if "transfer" in types else "same_number_stop" if types == {"same_number_stop"} else "unconfirmed"
+    result.update(routing=routing, baggage=offer.get("baggage"), same_ticket=offer.get("same_ticket"),
+                  refund_rules=offer.get("refund_rules"), change_rules=offer.get("change_rules"))
     return result
 
 
@@ -269,6 +305,7 @@ def run(args, requests, path, journal, today):
     primary = backup = None
     checked_primary = checked_backup = False
     pending = 0
+    hmac_key = private_key_for(path) if requests else None
 
     def get_primary():
         nonlocal primary, checked_primary
@@ -297,6 +334,23 @@ def run(args, requests, path, journal, today):
                      calendar=[], paired=[], sellers=[], completed=[])
             journal["batches"].append(b)
         dest = q["route"].split("-")[1]
+        def add_record(kind, out, back, price, state, source, **details):
+            criteria = dict(q, departure=out, return_date=back, scope="round_trip", engine=source,
+                            travel_class="economy", currency="JPY", adults=1, type=kind)
+            if "flight_numbers" in details:
+                criteria["flight_numbers"] = details["flight_numbers"]
+            fp = fingerprint(criteria, hmac_key)
+            b.setdefault("records", []).append(observation(source, jst_now(), q["route"], "round_trip",
+                     kind, out, back, price, state, fp, **details))
+
+        if q["departure"] < today.isoformat():
+            if "out_of_range" not in b["completed"]:
+                b["calendar_status"] = "out_of_range"
+                b["pair_status"] = [dict(depart=q["departure"], return_date=q["returnDate"], status="out_of_range")]
+                for kind in ("calendar", "paired"):
+                    add_record(kind, q["departure"], q["returnDate"], None, "out_of_range", "local_validation")
+                b["completed"].append("out_of_range")
+            continue
         base = dict(departure_id=CALENDAR_LOCATIONS["TYO"], arrival_id=CALENDAR_LOCATIONS[dest],
                     flight_type="round_trip", outbound_date=q["departure"], return_date=q["returnDate"],
                     gl="jp", hl="en", currency="JPY", adults=1, travel_class="economy")
@@ -305,12 +359,16 @@ def run(args, requests, path, journal, today):
                 if not get_primary():
                     raise Pending("无可用 SearchApi")
                 b["calendar"] = calendar(primary.search, base, q, today)
+                for cell in b["calendar"]:
+                    add_record("calendar", cell["departure"], cell["return"], cell["price"],
+                               cell["status"], "SearchApi / Google Flights")
                 b["calendar_status"] = "complete"
                 b["completed"].append("calendar")
                 save(path, journal)
             except Unavailable as exc:
                 pending += 1
                 b["calendar_status"] = "pending" if isinstance(exc, Pending) else "query_failed"
+                add_record("calendar", q["departure"], q["returnDate"], None, b["calendar_status"], "SearchApi / Google Flights")
                 print("日历未取得:", exc)
         targets = [(q["departure"], q["returnDate"])]
         for r in sorted((r for r in b["calendar"] if amount(r.get("price"))), key=lambda r:r["price"]):
@@ -329,43 +387,63 @@ def run(args, requests, path, journal, today):
                     state = dict(depart=out, return_date=back, status="pending")
                     pair_states.append(state)
                 try:
+                    source = "SearchApi / Google Flights"
                     if not get_primary():
                         raise Pending("无可用 SearchApi")
                     rows, booking, gparams = pair(primary, exact, dest)
                 except Unavailable as exc:
+                    first_state = "pending" if isinstance(exc, Pending) else "query_failed"
+                    add_record("paired", out, back, None, first_state, source)
                     print("主要配对未完成:", exc)
                     try:
-                        fallback = get_backup()
+                        fallback = get_backup() if dest in ("SHE", "BJS") else None
                         if not fallback:
                             raise Pending("无可用备用额度")
+                        source = "SerpApi / Google Flights"
                         rows, _, _ = pair(fallback, exact, dest)
                     except Unavailable as backup_exc:
                         print("该日期配对待下次继续:", backup_exc)
                         state["status"] = "pending" if isinstance(exc, Pending) and isinstance(backup_exc, Pending) else "query_failed"
+                        if source.startswith("SerpApi"):
+                            add_record("paired", out, back, None, "pending" if isinstance(backup_exc, Pending) else "query_failed", source)
                         pending += 1
                         continue
                 state["status"] = "priced" if rows else "not_returned"
+                if not rows:
+                    add_record("paired", out, back, None, "not_returned", source)
+                for quote in rows:
+                    add_record("paired", out, back, quote["total_jpy"], "priced", source,
+                               flight_numbers=flight_numbers(quote["outbound"]) + flight_numbers(quote["inbound"]),
+                               outbound=quote["outbound"], inbound=quote["inbound"], same_ticket=None,
+                               refund_rules=None, change_rules=None)
                 b["paired"].extend(rows)
                 b["completed"].append("pair:" + marker)
                 save(path, journal)
             if args.sellers and rows and "sky:" + marker not in b["completed"]:
                 try:
                     if not get_primary():
-                        raise Unavailable("无可用 SearchApi")
-                    b["sellers"].extend(sky_sellers(primary, exact, dest, rows))
+                        raise Pending("无可用 SearchApi")
+                    sellers = sky_sellers(primary, exact, dest, rows)
+                    for seller in sellers:
+                        add_record("seller", out, back, seller["price"], "priced", "SearchApi / Skyscanner",
+                                   seller=seller["book_with"], flight_numbers=seller["flight_numbers_out"] + seller["flight_numbers_back"])
+                    if not sellers:
+                        add_record("seller", out, back, None, "not_returned", "SearchApi / Skyscanner")
+                    b["sellers"].extend(sellers)
                     b["completed"].append("sky:" + marker)
                     save(path, journal)
                 except Unavailable as exc:
+                    add_record("seller", out, back, None, "pending" if isinstance(exc, Pending) else "query_failed", "SearchApi / Skyscanner")
                     pending += 1
                     print("卖家报价未取得:", exc)
             if args.google_sellers and rows and "google:" + marker not in b["completed"]:
                 try:
                     if not get_primary():
-                        raise Unavailable("无可用 SearchApi")
+                        raise Pending("无可用 SearchApi")
                     quotes = rows
                     if gparams is None:
                         if primary.remaining < 3:
-                            raise Unavailable("重新选择同一行程和比价至少需要三次额度")
+                            raise Pending("重新选择同一行程和比价至少需要三次额度")
                         quotes, booking, gparams = pair(primary, exact, dest)
                     if not booking or not quotes:
                         raise Unavailable("未返回 Google 预订标识")
@@ -377,11 +455,17 @@ def run(args, requests, path, journal, today):
                     options = primary.search(dict(gparams, booking_token=booking)).get("booking_options")
                     if not isinstance(options, list):
                         raise Unavailable("Google 购票渠道未返回")
-                    b["sellers"].extend(seller_rows(options, quotes[0]["outbound"], quotes[0]["inbound"],
-                                                    out, back, "Google Flights"))
+                    sellers = seller_rows(options, quotes[0]["outbound"], quotes[0]["inbound"], out, back, "Google Flights")
+                    for seller in sellers:
+                        add_record("seller", out, back, seller["price"], "priced", "SearchApi / Google Flights",
+                                   seller=seller["book_with"], flight_numbers=seller["flight_numbers_out"] + seller["flight_numbers_back"])
+                    if not sellers:
+                        add_record("seller", out, back, None, "not_returned", "SearchApi / Google Flights")
+                    b["sellers"].extend(sellers)
                     b["completed"].append("google:" + marker)
                     save(path, journal)
                 except Unavailable as exc:
+                    add_record("seller", out, back, None, "pending" if isinstance(exc, Pending) else "query_failed", "SearchApi / Google Flights")
                     pending += 1
                     print("Google 同班卖家报价待下次继续:", exc)
     save(path, journal)
