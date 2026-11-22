@@ -1,0 +1,17 @@
+name: 免费接口专项核对
+on: workflow_dispatch
+permissions: {}
+concurrency: manual-provider-probe
+jobs:
+  probe:
+    if: github.ref == 'refs/heads/main' && github.run_attempt == 1
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: 检查赠送额度和供应商能力
+        env:
+          SEARCHAPI_KEY: ${{ secrets.SEARCHAPI_KEY }}
+          PROBE_CONTEXT: ${{ secrets.FLIGHT_PROBE_CONTEXT }}
+        run: python3 scripts/provider_checks.py
