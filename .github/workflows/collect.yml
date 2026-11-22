@@ -63,7 +63,9 @@ jobs:
             python scripts/collect.py
           fi
       - name: 汇总每月最低价和并列出发日
-        run: python scripts/monthly_lows.py
+        run: |
+          python scripts/monthly_lows.py
+          python scripts/observations.py
       - name: 保存数据
         run: |
           git config user.name "github-actions[bot]"

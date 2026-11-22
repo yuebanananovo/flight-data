@@ -25,7 +25,7 @@
                                             用 Google 返回的历史价格拼出过去的走势。
                                             free 档最多 120 次，starter / full 档约 560 次
 """
-from fare_history import record
+from fare_history import DATA, read, record, save
 
 import argparse
 import calendar
@@ -366,6 +366,7 @@ def main():
                         pass
             ok += int(got > 0)
             print(f"{route} 回填：拿到 {got} 个过去的价格点")
+    checks = {}
     daily_leads = plan["leads"]
     if args.calendar_only or (plan_name == "free" and today.weekday() != 0 and not args.no_calendar):
         daily_leads = []
@@ -424,9 +425,15 @@ def main():
                 params = dict(calendar_query(base, route, today), stops=stops)
                 res = call(params, key, args.fixture, f"{route}_calendar{tag}")
                 calls += 1
+                checks.setdefault(route, {})[tag] = "ok" if res is not None else "failed"
                 if not res:
                     continue
                 lst = calendar_prices(res)
+                if tag == "*D" and lst:
+                    direct = DATA / "direct" / (today.isoformat()[:7] + ".json")
+                    logs = read(direct)
+                    logs.setdefault(today.isoformat(), {})[route] = lst
+                    save(direct, logs)
                 if lst:
                     ok += 1
                     cal[field][route] = lst
@@ -441,11 +448,24 @@ def main():
                 params = dict(calendar_query(base, route, today), type="1", round_trip_days=trip)
                 res = call(params, key, args.fixture, f"{route}_calendarRT")
                 calls += 1
+                checks.setdefault(route, {})["rt-" + str(trip)] = "ok" if res is not None else "failed"
                 lst = calendar_rt_prices(res or {}, trip)
                 if lst:
                     cal["routesRT"].setdefault(route, {})[str(trip)] = lst
+                    rt_file = DATA / "roundtrips" / (today.isoformat()[:7] + ".json")
+                    archive = read(rt_file)
+                    archive.setdefault(today.isoformat(), {}).setdefault(route, {})[str(trip)] = lst
+                    save(rt_file, archive)
+                    cal.setdefault("rtObserved", {}).setdefault(route, {})[str(trip)] = today.isoformat()
                 print(f"{route} 往返价格日历（去 {trip} 天回）: {len(lst)} 天")
 
+    if checks:
+        path = DATA / "calendar-status" / (today.isoformat()[:7] + ".json")
+        runs = read(path)
+        attempts = runs.setdefault(today.isoformat(), [])
+        if not attempts or attempts[-1] != checks:
+            attempts.append(checks)
+        save(path, runs)
     if not ok:
         print("没有取到本次所需的价格，请检查接口、密钥和账户额度。", file=sys.stderr)
         return 1
@@ -473,6 +493,9 @@ def main():
     for field in ("routes", "routesDirect"):
         for r, lst in (old_cal.get(field) or {}).items():
             cal[field].setdefault(r, lst)
+    for r, by_len in (old_cal.get("rtObserved") or {}).items():
+        for trip, obs in by_len.items():
+            cal.setdefault("rtObserved", {}).setdefault(r, {}).setdefault(trip, obs)
     for r, by_len in (old_cal.get("routesRT") or {}).items():
         for trip, lst in by_len.items():
             cal["routesRT"].setdefault(r, {}).setdefault(trip, lst)

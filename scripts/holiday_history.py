@@ -2,18 +2,16 @@
 import datetime as dt
 import json
 import os
-import re
 import urllib.error
 import urllib.parse
 import urllib.request
 
 from collect import AIRPORTS, PLANS, airline_prices, jst_today
-from fare_history import DATA, JST, import_saved, read, record, save
+from fare_history import DATA, import_saved, read, record, save
 
 FIRST = dt.date(2026, 12, 15)
 LAST = dt.date(2027, 1, 8)
 ROUTES = ["TYO-SHE", "SHE-TYO", "TYO-BJS", "BJS-TYO"]
-CITIES = {v: k for k, v in AIRPORTS.items()}
 PUBLIC_DATES = [(r, (FIRST + dt.timedelta(days=i)).isoformat())
                 for i in range((LAST - FIRST).days + 1) for r in ROUTES]
 
@@ -30,63 +28,9 @@ def api(path, key, **params):
     return None
 
 
-def restore(key):
-    # Only restore benchmark queries already present in public collection data, or in the holiday list.
-    allowed = set(PUBLIC_DATES)
-    allowed.update((r, d) for _, r, d, *_ in read(DATA / "prices.json").get("rows", []))
-    allowed.update((r, d) for d, routes in read(DATA / "trips.json").get("dates", {}).items() for r in routes)
-    seen = set()
-    updated = 0
-    cursor = {}
-    for _ in range(30):
-        page = api("searches.json", key, **cursor)
-        if isinstance(page, dict):
-            records = page.get("searches") or page.get("data") or []
-            if not records:
-                print("归档列表字段", sorted(page)[:12], flush=True)
-        else:
-            records = page or []
-        if not records or not isinstance(records, list):
-            break
-        ids = []
-        for item in records:
-            meta = item if isinstance(item, dict) else {}
-            sid = item if isinstance(item, str) else meta.get("id") or (meta.get("search_metadata") or {}).get("id")
-            if not isinstance(sid, str) or not re.fullmatch("[a-fA-F0-9]{24}", sid):
-                continue
-            ids.append(sid)
-            if sid in seen:
-                continue
-            seen.add(sid)
-            hint = meta.get("engine") or (meta.get("search_parameters") or {}).get("engine")
-            if hint and hint != "google_flights":
-                continue
-            res = api("searches/" + sid + ".json", key) or {}
-            p = res.get("search_parameters") or {}
-            route = str(CITIES.get(p.get("departure_id"))) + "-" + str(CITIES.get(p.get("arrival_id")))
-            dep = p.get("outbound_date")
-            if (route, dep) not in allowed or p.get("engine") != "google_flights" or str(p.get("type")) != "2":
-                continue
-            if p.get("currency") != "JPY" or p.get("include_airlines") or p.get("exclude_airlines") or str(p.get("stops", 0)) != "0" or str(p.get("travel_class", 1)) != "1":
-                continue
-            stamp = res.get("search_metadata", {}).get("created_at", "")
-            observed = None
-            try:
-                observed = dt.datetime.fromisoformat(stamp.replace(" UTC", "+00:00")).astimezone(JST).date().isoformat()
-            except (ValueError, TypeError):
-                pass
-            if record(route, dep, (res.get("price_insights") or {}).get("price_history"), observed=observed, airlines=airline_prices(res)):
-                updated += 1
-        if not ids or cursor.get("before") == ids[-1]:
-            break
-        cursor = {"before": ids[-1]}
-    print(f"读到 {len(seen)} 条归档索引，恢复 {updated} 条含历史的公开查询。", flush=True)
-
-
 def main():
     key = os.environ["SERPAPI_KEY"]
     import_saved()
-    restore(key)
     today = jst_today()
     account = api("account.json", key) or {}
     name = str(account.get("plan_name", "")).lower()
@@ -103,25 +47,30 @@ def main():
     attempted_path = DATA / "history" / "holiday-coverage.json"
     previous = read(attempted_path)
     queried = dict(previous.get("queried", {}))
+    deep_checked = dict(previous.get("deep_checked", {}))
     series = {}
     for route, dep in PUBLIC_DATES:
         entry = read(DATA / "history" / (dep[:7] + ".json")).get(route, {}).get(dep, {})
         n = len(entry.get("google", {}))
         tag = route + "/" + dep
-        if not n and not queried.get(tag) and budget > 0 and dep >= today.isoformat():
+        if not n and not deep_checked.get(tag) and budget > 0 and dep >= today.isoformat():
+            deep = tag in queried
             a, b = route.split("-")
             budget -= 1
             res = api("search.json", key, engine="google_flights", type="2", currency="JPY", hl="zh-cn", gl="jp",
-                      departure_id=AIRPORTS[a], arrival_id=AIRPORTS[b], outbound_date=dep)
+                      departure_id=AIRPORTS[a], arrival_id=AIRPORTS[b], outbound_date=dep,
+                      **({"deep_search": "true"} if deep else {}))
             if isinstance(res, dict) and not res.get("error"):
                 n = record(route, dep, (res.get("price_insights") or {}).get("price_history"),
                            observed=today.isoformat(), airlines=airline_prices(res))
                 queried[tag] = today.isoformat()
+                if deep:
+                    deep_checked[tag] = today.isoformat()
             elif not res:
                 budget = 0
         series[tag] = n
     save(attempted_path, {"start": FIRST.isoformat(), "end": LAST.isoformat(), "routes": ROUTES,
-                          "queried": queried, "observations": series})
+                          "queried": queried, "deep_checked": deep_checked, "observations": series})
     print(f"重点时段有 Google 历史的组合：{sum(n > 0 for n in series.values())}/{len(series)}。", flush=True)
 
 
