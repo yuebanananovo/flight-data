@@ -77,10 +77,14 @@ def jst_today():
     return (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=9)).date()
 
 
+def six_months_after(today):
+    year, month = divmod(today.year * 12 + today.month - 1 + 6, 12)
+    return today.replace(year=year, month=month + 1, day=min(today.day, calendar.monthrange(year, month + 1)[1]))
+
+
 def calendar_query(base, route, today):
     origin, dest = route.split("-")
-    year, month = divmod(today.year * 12 + today.month - 1 + 6, 12)
-    end = today.replace(year=year, month=month + 1, day=min(today.day, calendar.monthrange(year, month + 1)[1]))
+    end = six_months_after(today)
     return dict(base, engine="google_flights_calendar", departure_id=CALENDAR_LOCATIONS[origin],
                 arrival_id=CALENDAR_LOCATIONS[dest], date_range_start=today.isoformat(),
                 date_range_end=end.isoformat())
