@@ -125,13 +125,14 @@ def month_report(day, config, public_missing=()):
         completed = {(t.route,t.start) for t in tasks if t.kind=="history"}
         remaining_history = [h for h in remaining_history if h not in completed]
         total["original_pair_calls_max"] += 2*len(originals(date,config))
-        total["extra_pair_calls_max"] += 2*max_pairs*int(any(t.kind in ("ordinary","holiday") for t in tasks))
+        total["extra_pair_calls_max"] += 2*max_pairs
+        total["focus_pair_calls_max"] += 2*sum(len(groups) for groups in FOCUS_CARRIERS.values())
     reserve = int(config.get("reserve",100))
     limit = int(config.get("monthly_limit",1000))
     if not 0 <= reserve < limit:
         raise ValueError("额度保留值必须低于月度上限")
     full_max = sum(total.values())
-    lower = full_max - total["extra_pair_calls_max"] - total["original_pair_calls_max"]//2
+    lower = full_max - total["extra_pair_calls_max"] - total["focus_pair_calls_max"] - total["original_pair_calls_max"]//2
     return dict(days=days, by_category=dict(total), full_max=full_max, full_min=lower,
                 cap=limit, reserve=reserve, usable=limit-reserve,
                 unserved_at_max=max(0,full_max-(limit-reserve)))

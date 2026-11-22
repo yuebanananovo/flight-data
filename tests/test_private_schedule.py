@@ -87,13 +87,49 @@ class PrivateScheduleTests(unittest.TestCase):
              patch.object(pc,"collect_task",return_value=[r]) as collect:
             folder=Path(temp)
             pc.execute(p,DAY,config,folder,[t])
-            self.assertEqual([c.args[1]["outbound_date"] for c in get_pair.call_args_list],
+            self.assertEqual([c.args[1]["outbound_date"] for c in get_pair.call_args_list if not c.args[1].get("included_airlines")],
                              [config["requests"][0]["departure"],DAY.isoformat()])
+            self.assertEqual({c.args[1].get("included_airlines") for c in get_pair.call_args_list},
+                             {None,"CA","CZ","KE","MU,FM"})
             pc.execute(p,DAY,config,folder,[t])
             self.assertEqual(collect.call_count,1)
-            self.assertEqual(get_pair.call_count,2)
+            self.assertEqual(get_pair.call_count,6)
             result=json.loads((folder/(DAY.isoformat()+".json")).read_text())
             self.assertTrue(any(b["calendar"] for b in result["batches"]))
+
+    def test_day_without_calendars_pairs_ten_carrier_groups_and_reports_gaps(self):
+        source="2030-02-28T10:17:00+09:00"
+        cell=dict(departure="2030-03-10",price=30000,status="priced",**{"return":"2030-04-10"})
+        with tempfile.TemporaryDirectory() as temp:
+            folder=Path(temp)
+            yesterday=dict(version=1,batches=[dict(route="TYO-"+c,observed_at_jst=source,calendar=[cell]) for c in pp.CITIES])
+            (folder/"2030-02-28.json").write_text(json.dumps(yesterday))
+            p=Mock(remaining=25,stopped=False)
+            def check_leg(provider,params,city,accept_offer=None):
+                carrier=params.get("included_airlines")
+                if carrier and "," not in carrier:
+                    one={"flights":[{"flight_number":carrier+"123"}]}
+                    self.assertTrue(accept_offer(one))
+                    self.assertFalse(accept_offer({"flights":[{"flight_number":"ZZ123"}]}))
+                    if params.get("stops")=="nonstop":
+                        self.assertFalse(accept_offer({"flights":[one["flights"][0],one["flights"][0]]}))
+                provider.remaining-=2
+                return [],None,None
+            with patch.object(pc,"pair",side_effect=check_leg) as get, patch.object(pc,"collect_task",side_effect=AssertionError):
+                pc.execute(p,DAY,{"lowest_pairs":1},folder,[])
+                self.assertEqual(get.call_count,11)
+                combos={(c.args[2],c.args[1].get("included_airlines"),c.args[1]["stops"]) for c in get.call_args_list}
+                self.assertTrue(all((city,carrier,stops) in combos for city,groups in pp.FOCUS_CARRIERS.items()
+                                    for carrier,stops in groups))
+                result=json.loads((folder/(DAY.isoformat()+".json")).read_text())
+                self.assertTrue(all(r["candidate_observed_at_jst"]==source for r in result["pair_coverage"].values()))
+                self.assertEqual({r["status"] for r in result["pair_coverage"].values()},{"not_returned"})
+                tomorrow=DAY+pp.DAY
+                p.remaining=1
+                pc.execute(p,tomorrow,{"lowest_pairs":1},folder,[])
+                self.assertEqual(get.call_count,11)
+                later=json.loads((folder/(tomorrow.isoformat()+".json")).read_text())
+                self.assertEqual({r["status"] for r in later["pair_coverage"].values()},{"quota_insufficient"})
 
     def test_paid_guard_excludes_free_credits_and_reserves_budget(self):
         free={"account":{"monthly_allowance":0,"remaining_credits":100,"remaining_searches":100},

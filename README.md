@@ -51,6 +51,7 @@ python3 scripts/round_trips.py ~/Downloads/queue.json \
 
 - `holidays` 是假期数组，每项包含 `departure` 和 `returnDate`；`requests` 是要精确配对的私人原日期数组，还需要 `route`。
 - `stays` 默认 `[7,14,21,30]`，`lowest_pairs` 默认 2 组。若整月全覆盖超过预算，普通窗口按日轮转。
+- 每天先核实私有原日期，再给沈阳、北京、大连的 10 个重点航司与路线组合各核实一对去回航班，并核实最低日期候选。当天没有日历时，使用各航线最近仍有效的日历选日期，记录候选来源时刻。日报中的 `pair_coverage`、`candidate_gaps` 分别保存实查状态与缺少候选的目标。重点航司配对每天最多用 20 次，再加 `2 × lowest_pairs` 和原日期的实际配对用量。
 - `monthly_limit` 默认 1000，`reserve` 默认 100，`daily_limit` 默认 40。每次查询还受实际账户月余量、小时余量及按剩余日数分配的预算限制。
 
 需在私有仓库手动设置 Variable `ENABLE_PAID_FLIGHTS=true` 和对应 Secret `SEARCHAPI_KEY`，工作流会再次核对付费月度额度。结果只写入该私库的 `private-flight-data/`。按日期命名的 JSON 可导入网站；`one_way_calendar` 与 `filtered_calendar` 各自保留筛选口径，完整观察另按日压缩存档。网页当前支持的完整往返日历与配对沿用 `calendar`、`paired`。
