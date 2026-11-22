@@ -5,6 +5,10 @@ on:
     - cron: '17 1 * * *'   # 每天日本时间 10:17（GitHub 用 UTC 时间）
   workflow_dispatch:        # 也可以在 Actions 页面手动点 “Run workflow”
     inputs:
+      departure:
+        description: '可选：指定从东京出发的单程日期（YYYY-MM-DD），同时取同月日历'
+        type: string
+        required: false
       backfill:
         description: '回填过去约两个月的价格（只需要跑一次）'
         type: boolean
@@ -29,7 +33,16 @@ jobs:
         env:
           SERPAPI_KEY: ${{ secrets.SERPAPI_KEY || secrets.FLY }}
           PLAN: ${{ vars.PLAN }}
-        run: python scripts/collect.py ${{ inputs.backfill && '--backfill' || '' }}
+          DEPARTURE: ${{ inputs.departure }}
+          BACKFILL: ${{ inputs.backfill }}
+        run: |
+          if [ -n "$DEPARTURE" ]; then
+            python scripts/trip.py "$DEPARTURE"
+          elif [ "$BACKFILL" = true ]; then
+            python scripts/collect.py --backfill
+          else
+            python scripts/collect.py
+          fi
       - name: 保存数据
         run: |
           git config user.name "github-actions[bot]"
