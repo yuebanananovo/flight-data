@@ -97,18 +97,49 @@ def round_trip_length(plan, route, today):
     return RT_LENS[(slot + ROUTES.index(route)) % len(RT_LENS)]
 
 
-def backfill_allowance(key, remaining):
-    """回填前读取免费账户接口，仅在小时额度足够时继续。"""
+def account_capacity(key):
     url = "https://serpapi.com/account.json?" + urllib.parse.urlencode({"api_key": key})
+    try:
+        with urllib.request.urlopen(url, timeout=30) as response:
+            account = json.load(response)
+        total = int(account["total_searches_left"])
+        hourly = int(account["account_rate_limit_per_hour"]) - int(account["this_hour_searches"])
+        return total, hourly, account.get("plan_renewal_date")
+    except (OSError, ValueError, KeyError, TypeError):
+        sys.exit("无法确认账户额度，停止回填。")
+
+
+def free_backfill_dates(today, routes, total, renewal):
+    route_count = len(routes)
+    # 先留足下次续期前的每日查询和周一日历。未提供续期日时按完整周期预算。
+    try:
+        days = (dt.date.fromisoformat(renewal[:10]) - today).days
+    except (TypeError, ValueError):
+        days = 31
+    if not 1 <= days <= 31:
+        days = 31
+    reserve = route_count * sum(1 + 2 * int((today + dt.timedelta(days=i)).weekday() == 0)
+                                for i in range(1, days + 1))
+    budget = min(len(BACKFILL_DEPS) * route_count, max(0, total - reserve))
+    count, extra = divmod(budget, route_count)
+    print(f"剩余 {total} 次，预留 {reserve} 次用于常规采集；本次回填最多 {budget} 次。", flush=True)
+    dates = {}
+    # 额度不足以每个方向再查一轮时，优先安排从东京出发的行程。
+    for i, route in enumerate(sorted(routes, key=lambda route: not route.startswith("TYO-"))):
+        n = count + int(i < extra)
+        if n < 2:
+            dates[route] = BACKFILL_DEPS[:n]
+            continue
+        pool = [k for k in BACKFILL_DEPS if k < 30] if n <= 9 else BACKFILL_DEPS
+        dates[route] = [pool[round(j * (len(pool) - 1) / (n - 1))] for j in range(n)]
+    return dates
+
+
+def backfill_allowance(key, remaining):
     for attempt in range(3):
-        try:
-            with urllib.request.urlopen(url, timeout=30) as response:
-                account = json.load(response)
-            if int(account["total_searches_left"]) < remaining:
-                sys.exit("剩余搜索额度不足以完成本次回填，停止。")
-            available = int(account["account_rate_limit_per_hour"]) - int(account["this_hour_searches"])
-        except (OSError, ValueError, KeyError, TypeError):
-            sys.exit("无法确认账户额度，停止回填。")
+        total, available, _ = account_capacity(key)
+        if total < remaining:
+            sys.exit("剩余搜索额度不足以完成本次回填，停止。")
         if available > 0:
             return available
         if attempt < 2:
@@ -282,15 +313,22 @@ def main():
     base = {"engine": "google_flights", "type": "2", "currency": "JPY", "hl": "zh-cn", "gl": "jp"}
     calls = ok = 0
     if args.backfill:
-        remaining = len(routes) * len(BACKFILL_DEPS)
+        dates = {route: BACKFILL_DEPS for route in routes}
+        if plan_name == "free" and not args.fixture:
+            total, _, renewal = account_capacity(key)
+            dates = free_backfill_dates(today, routes, total, renewal)
+            if not any(dates.values()):
+                print("本期余量已留给常规采集，本次未执行回填。")
+                return 0
+        remaining = sum(map(len, dates.values()))
         allowance = 0
         routes_to_do = routes
-        print(f"回填：{len(routes_to_do)} 个航线方向 × {len(BACKFILL_DEPS)} 个出发日期，约 {len(routes_to_do) * len(BACKFILL_DEPS)} 次调用")
+        print(f"回填：{len(routes_to_do)} 个航线方向，约 {remaining} 次调用")
         routes = []  # 回填时不做每天的常规采集
         for route in routes_to_do:
             a, b = route.split("-")
             got = 0
-            for k in BACKFILL_DEPS:
+            for k in dates[route]:
                 if not args.fixture and allowance == 0:
                     if calls:
                         print("本批小时额度已用完，约 60 分钟后继续回填。", flush=True)
