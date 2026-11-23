@@ -51,7 +51,9 @@ def fetch(url, params, headers):
         raise Unavailable(f"HTTP {exc.code}") from None
     except (OSError, ValueError):
         raise Unavailable("服务连接或响应异常") from None
-    if isinstance(result, dict) and "hasn't returned any results" in str(result.get("error", "")):
+    error = str(result.get("error") or "").lower() if isinstance(result, dict) else ""
+    if any(phrase in error for phrase in ("hasn't returned any results", "has not returned any results",
+                                           "no flights found", "no flights were found", "no flights matched")):
         return {"best_flights": [], "other_flights": [], "calendar": [], "booking_options": []}
     if not isinstance(result, dict) or result.get("error"):
         raise Unavailable("服务未返回有效结果")

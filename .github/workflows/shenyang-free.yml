@@ -23,6 +23,6 @@ jobs:
         env:
           SEARCHAPI_KEY: ${{ secrets.SEARCHAPI_KEY }}
           HELPER_FLIGHT_QUEUE_KEY: ${{ secrets.HELPER_FLIGHT_QUEUE_KEY }}
-          MODE: ${{ inputs.mode || 'daily' }}
+          MODE: ${{ inputs.mode || 'scheduled' }}
         run: |
           python3 scripts/shenyang_free.py "$MODE"
