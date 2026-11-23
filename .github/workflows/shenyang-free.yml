@@ -1,0 +1,28 @@
+name: 沈阳原日期免费往返
+on:
+  schedule:
+    - cron: '17 1 * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        type: choice
+        default: probe
+        options: [probe, daily]
+permissions:
+  contents: read
+concurrency:
+  group: shenyang-free
+  cancel-in-progress: false
+jobs:
+  collect:
+    if: github.ref == 'refs/heads/main' && github.run_attempt == 1
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 核对余额并处理已确认的原日期
+        env:
+          SEARCHAPI_KEY: ${{ secrets.SEARCHAPI_KEY }}
+          HELPER_FLIGHT_QUEUE_KEY: ${{ secrets.HELPER_FLIGHT_QUEUE_KEY }}
+          MODE: ${{ inputs.mode || 'daily' }}
+        run: |
+          python3 scripts/shenyang_free.py "$MODE"

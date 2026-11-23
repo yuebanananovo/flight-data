@@ -38,7 +38,7 @@ class PaidProvider:
         self.headers = {"Authorization":"Bearer " + os.environ["SEARCHAPI_KEY"]}
         acc = fetch("https://www.searchapi.io/api/v1/me", {}, self.headers)
         plan, usage = acc["account"], acc["api_usage"]
-        limit = int(config.get("monthly_limit",1000))
+        limit = int(config.get("monthly_limit",10000))
         reserve = int(config.get("reserve",100))
         daily_max = int(config.get("daily_limit", 40))
         if not 0 <= reserve < limit or daily_max < 0 or int(plan["monthly_allowance"]) <= 0:

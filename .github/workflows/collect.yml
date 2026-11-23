@@ -41,9 +41,6 @@ jobs:
         if: ${{ !inputs.stats_only }}
         env:
           SERPAPI_KEY: ${{ secrets.SERPAPI_KEY || secrets.FLY }}
-          SEARCHAPI_KEY: ${{ secrets.SEARCHAPI_KEY }}
-          DAILY_SEARCHAPI_LIMIT: ${{ vars.DAILY_SEARCHAPI_LIMIT }}
-          SEARCHAPI_RESERVE: ${{ vars.SEARCHAPI_RESERVE }}
           PLAN: ${{ vars.PLAN }}
           CALENDAR_ONLY: ${{ inputs.calendar_only }}
           HOLIDAY_HISTORY: ${{ inputs.holiday_history }}

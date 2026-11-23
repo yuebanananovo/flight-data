@@ -128,7 +128,7 @@ def month_report(day, config, public_missing=()):
         total["extra_pair_calls_max"] += 2*max_pairs
         total["focus_pair_calls_max"] += 2*sum(len(groups) for groups in FOCUS_CARRIERS.values())
     reserve = int(config.get("reserve",100))
-    limit = int(config.get("monthly_limit",1000))
+    limit = int(config.get("monthly_limit",10000))
     if not 0 <= reserve < limit:
         raise ValueError("额度保留值必须低于月度上限")
     full_max = sum(total.values())
