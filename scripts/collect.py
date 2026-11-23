@@ -290,6 +290,7 @@ def calendar_prices(res):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--one-way-only", action="store_true", help="只更新单程，保留已有往返历史")
     ap.add_argument("--no-calendar", action="store_true")
     ap.add_argument("--calendar-only", action="store_true", help="只采集所有方向的半年单程日历")
     ap.add_argument("--fixture")
@@ -376,7 +377,7 @@ def main():
         from daily_sources import DailySources
         calendars = int(plan_name == "free" or args.calendar_only or plan["cal"](today))
         if not args.calendar_only:
-            calendars += int(plan["cal_direct"](today)) + int(plan["cal"](today))
+            calendars += int(plan["cal_direct"](today)) + int(plan["cal"](today) and not args.one_way_only)
         count = len(daily_leads) + (0 if args.no_calendar else calendars)
         count += int(bool(daily_leads) and plan["booking"](today))
         scheduled = DailySources(key, len(routes) * count)
@@ -459,7 +460,7 @@ def main():
                             rows[(today.isoformat(), route, d, tag)] = p
                 print(f"{route} 价格日历（{'直飞' if tag == '*D' else '含转机'}）: {len(lst)} 天")
             # 往返票价格日历：这次查哪种“去几天回”，按日期和航线轮换
-            if plan["cal"](today) and not args.calendar_only:
+            if plan["cal"](today) and not args.calendar_only and not args.one_way_only:
                 trip = round_trip_length(plan_name, route, today)
                 params = dict(calendar_query(base, route, today), type="1", round_trip_days=trip)
                 res = query(params, route, f"{route}_calendarRT")

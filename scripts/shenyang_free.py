@@ -92,9 +92,9 @@ def collect(account, job, mode):
     for carrier in carriers:
         status = "query_failed"
         params = dict(base, included_airlines="MU,FM" if carrier == "MU" else carrier)
-        if carrier == "CZ":
-            params["stops"] = "nonstop"
-        if shared:
+        # The narrow CZ provider filter errored. The four-carrier probe returned
+        # selectable CZ nonstops. Check every segment in both directions locally.
+        if shared or carrier == "CZ":
             params = shared_params
         if carrier == interrupted and min(8 - prior_count - account.calls, account.remaining) < 2:
             diagnostic = "previous_attempt_failed"

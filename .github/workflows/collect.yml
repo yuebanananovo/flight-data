@@ -53,7 +53,7 @@ jobs:
           elif [ "$BACKFILL" = true ]; then
             python scripts/collect.py --backfill
           else
-            python scripts/collect.py
+            python scripts/collect.py --one-way-only
           fi
       - name: 汇总每月最低价和并列出发日
         run: |
