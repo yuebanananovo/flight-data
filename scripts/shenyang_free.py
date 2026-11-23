@@ -122,7 +122,7 @@ def collect(account, job, mode):
     return dict(batch=batch)
 
 
-def run(mode):
+def run(mode, reserve_daily=False):
     key=os.environ["SEARCHAPI_KEY"]
     account=Provider("SearchApi",key,8,0)
     now=lambda credits: dict(remaining=credits,observed_at_jst=jst_now())
@@ -134,7 +134,8 @@ def run(mode):
     cap=1 if mode=="probe" else 5 if job["strategy"]=="shared" else 8
     receipt=dict(action="finish",mode=mode,id=job["id"],lease=job["lease"],state="insufficient")
     prior_calls = (job.get("prior") or {}).get("calls", 0)
-    if account.remaining >= cap - prior_calls:
+    enough_for_next_round = not reserve_daily or account.credits >= 9
+    if enough_for_next_round and account.remaining >= cap - prior_calls:
         try:
             receipt.update(collect(account,job,mode))
             receipt["state"]="complete"
@@ -167,7 +168,7 @@ if __name__=="__main__":
     try:
         mode = parser.parse_args().mode
         if mode == "scheduled":
-            run("probe")
+            run("probe", reserve_daily=True)
             mode = "daily"
         run(mode)
     except Exception:
